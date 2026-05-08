@@ -1,0 +1,27 @@
+# --- Core ---
+streamlit>=1.31
+opencv-python>=4.8
+numpy>=1.24
+pandas>=2.0
+Pillow>=10.0
+
+# --- dlib backend (default) ---
+# dlib has no pip wheel on some Windows + Python 3.12 combos; if `pip install dlib`
+# fails, install conda's prebuilt:  conda install -c conda-forge dlib
+dlib>=19.24
+
+# --- torch backend (optional, recommended on machines with NVIDIA GPUs) ---
+# For CUDA wheels:
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
+# For CPU-only:
+#   pip install torch torchvision
+torch>=2.2
+torchvision>=0.17
+facenet-pytorch>=2.5
+
+# --- arcface backend (optional) ---
+# Install separately when you want it:
+#   pip install insightface onnxruntime-gpu     # CUDA
+#   pip install insightface onnxruntime          # CPU
+# insightface
+# onnxruntime-gpu

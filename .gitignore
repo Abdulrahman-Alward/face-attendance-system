@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Streamlit
+.streamlit/
+
+# Runtime data — these are produced by the app, not source.
+# Comment any line out if you want to commit a sample dataset / report.
+data/dataset/
+data/attendance_reports/
+data/logs/
+data/encodings_*.pkl
+data/settings.json
+
+# Bundled dlib model files (~127 MB total). Exclude from the repo and
+# clone them on first setup — see README "Setup". The LICENSE and the
+# small __init__.py are kept under version control for attribution.
+models/face_recognition_models/models/*.dat
+
+# Build artifacts from previous attempts
+build*.log
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Local agent state
+.claude/

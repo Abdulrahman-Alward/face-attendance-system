@@ -137,13 +137,13 @@ class Config:
     target_fps: float = 30.0            # display loop is paced to this rate
     camera_index: int = 0
 
-    # IoU-based face tracking. Detected boxes that overlap a previous
-    # recognition by at least `iou_match_threshold` reuse that identity
-    # without re-encoding (encoding is the expensive step on CPU).
-    # Identities are still re-confirmed every `reidentify_every_seconds`
-    # to handle people swapping seats / drift.
+    # IoU-based face tracking with a centroid-distance fallback. Detections
+    # that overlap a previous recognition (IoU) — or, failing that, whose
+    # centroid moved less than half a face-width — reuse that cached
+    # identity without re-encoding. Identities are still re-confirmed every
+    # `reidentify_every_seconds` to handle people swapping seats / drift.
     iou_match_threshold: float = 0.4
-    reidentify_every_seconds: float = 3.0
+    reidentify_every_seconds: float = 20.0
 
     # A person not seen for this many minutes is considered to have LEFT.
     leave_timeout_minutes: float = 1.0
@@ -396,6 +396,26 @@ def _iou(a: Tuple[int, int, int, int], b: Tuple[int, int, int, int]) -> float:
     return inter / union if union > 0 else 0.0
 
 
+def _centroid_distance_normalized(
+    a: Tuple[int, int, int, int], b: Tuple[int, int, int, int]
+) -> float:
+    """Distance between box centroids, divided by the average box width.
+
+    Used as a fallback when IoU drops too low to match (e.g. a student
+    turns their head): if the centroid moved less than ~half a face
+    width, it's almost certainly still the same person.
+    """
+    a_top, a_right, a_bottom, a_left = a
+    b_top, b_right, b_bottom, b_left = b
+    ax = (a_left + a_right) * 0.5
+    ay = (a_top  + a_bottom) * 0.5
+    bx = (b_left + b_right) * 0.5
+    by = (b_top  + b_bottom) * 0.5
+    dx, dy = ax - bx, ay - by
+    avg_w = (((a_right - a_left) + (b_right - b_left)) * 0.5) or 1.0
+    return (dx * dx + dy * dy) ** 0.5 / avg_w
+
+
 class TrackingRecognizer:
     """Faster recognizer for live video.
 
@@ -442,21 +462,40 @@ class TrackingRecognizer:
         needs_encoding: List[int] = []   # indices into boxes_full / boxes_small
 
         # --- Match each detection against existing tracks ---
+        # Primary criterion: IoU >= iou_match_threshold (handles stationary faces).
+        # Fallback:          centroid distance < half a face-width (handles head
+        #                    motion, students turning, etc., where IoU drops sharply
+        #                    even though it's obviously the same person).
         used_track_ids = set()
         for i, box_full in enumerate(boxes_full):
-            best_iou, best_idx = 0.0, -1
+            best_iou, best_iou_idx = 0.0, -1
             for j, t in enumerate(self._tracks):
                 if j in used_track_ids:
                     continue
                 iou = _iou(box_full, t.box)
                 if iou > best_iou:
-                    best_iou, best_idx = iou, j
+                    best_iou, best_iou_idx = iou, j
+
+            matched_idx = -1
+            if best_iou_idx >= 0 and best_iou >= cfg.iou_match_threshold:
+                matched_idx = best_iou_idx
+            else:
+                # IoU failed; try centroid distance.
+                best_dist, best_dist_idx = float("inf"), -1
+                for j, t in enumerate(self._tracks):
+                    if j in used_track_ids:
+                        continue
+                    dist = _centroid_distance_normalized(box_full, t.box)
+                    if dist < best_dist:
+                        best_dist, best_dist_idx = dist, j
+                if best_dist_idx >= 0 and best_dist < 0.5:
+                    matched_idx = best_dist_idx
 
             reused = False
-            if best_idx >= 0 and best_iou >= cfg.iou_match_threshold:
-                track = self._tracks[best_idx]
+            if matched_idx >= 0:
+                track = self._tracks[matched_idx]
                 if (now - track.last_encoded_at) < cfg.reidentify_every_seconds:
-                    used_track_ids.add(best_idx)
+                    used_track_ids.add(matched_idx)
                     new_tracks.append(_TrackedFace(
                         box=box_full,
                         name=track.name,

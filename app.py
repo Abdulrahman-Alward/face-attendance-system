@@ -423,8 +423,10 @@ with st.sidebar:
             value=float(CFG.iou_match_threshold), step=0.05,
         )
         CFG.reidentify_every_seconds = st.slider(
-            "Re-identify every (s)", min_value=0.5, max_value=15.0,
-            value=float(CFG.reidentify_every_seconds), step=0.5,
+            "Re-identify every (s)", min_value=1.0, max_value=120.0,
+            value=float(CFG.reidentify_every_seconds), step=1.0,
+            help="In between encodings, the recognizer just detects + tracks "
+                 "faces by IoU and centroid distance. Default is 20 s.",
         )
 
         # Detector model is auto-selected per backend, but expose it here for
@@ -639,12 +641,19 @@ with live_tab:
 
         frame_budget = 1.0 / max(float(CFG.target_fps), 1.0)
         next_frame_deadline = time.time()
+        last_frame_id = -1
+        last_panel_update = 0.0
+        last_present_signature: tuple = ()
+        last_events_signature: tuple = ()
 
         try:
             # Streamlit interrupts this loop with a RerunException when the
             # user clicks Stop (the rerun fires at the next placeholder call).
             while st.session_state.running:
-                frame, last_results, fps, new_events, error = worker.snapshot()
+                (
+                    frame, frame_id, last_results,
+                    capture_fps, recognition_fps, new_events, error,
+                ) = worker.snapshot()
 
                 if error:
                     st.session_state.running = False
@@ -657,64 +666,82 @@ with live_tab:
                     st.session_state.recent_events.extend(new_events)
 
                 if frame is None:
-                    # Worker hasn't produced a frame yet — render a hint and yield.
                     video_placeholder.markdown(
                         '<div class="empty-hint">Warming up the camera…</div>',
                         unsafe_allow_html=True,
                     )
-                    time.sleep(0.05)
+                    time.sleep(0.03)
                     continue
 
-                # Faces recognized but waiting on a blink → "blink to confirm".
-                display_results = last_results
-                if CFG.require_blink_to_mark:
-                    display_results = []
-                    for r in last_results:
-                        if (r.name != "Unknown"
-                                and r.name not in tracker.confirmed
-                                and not blink_detector.has_blinked(r.name)):
-                            r = type(r)(
-                                name=f"{r.name} · blink to confirm",
-                                box=r.box,
-                                confidence=r.confidence,
-                            )
-                        display_results.append(r)
+                # Only re-render the video when a NEW frame is available.
+                # Skips Streamlit overhead on duplicate snapshots.
+                if frame_id != last_frame_id:
+                    last_frame_id = frame_id
 
-                annotated = annotate_frame(frame, display_results)
+                    display_results = last_results
+                    if CFG.require_blink_to_mark:
+                        display_results = []
+                        for r in last_results:
+                            if (r.name != "Unknown"
+                                    and r.name not in tracker.confirmed
+                                    and not blink_detector.has_blinked(r.name)):
+                                r = type(r)(
+                                    name=f"{r.name} · blink to confirm",
+                                    box=r.box,
+                                    confidence=r.confidence,
+                                )
+                            display_results.append(r)
 
-                video_placeholder.image(
-                    cv2.cvtColor(annotated, cv2.COLOR_BGR2RGB),
-                    channels="RGB",
-                    use_container_width=True,
-                )
+                    annotated = annotate_frame(frame, display_results)
+                    video_placeholder.image(
+                        cv2.cvtColor(annotated, cv2.COLOR_BGR2RGB),
+                        channels="RGB",
+                        use_container_width=True,
+                    )
 
-                metrics_placeholder.markdown(
-                    f'<div style="display:grid; grid-template-columns: repeat(3, 1fr); gap: 0.7rem; margin-top:0.6rem;">'
-                    f'  {_metric_card("Present now", str(len(tracker.currently_present)), "in classroom")}'
-                    f'  {_metric_card("Marked today", str(len(tracker.attendance_marked)), "unique attendees")}'
-                    f'  {_metric_card("Recognition FPS", f"{fps:.1f}", "worker thread")}'
-                    f'</div>',
-                    unsafe_allow_html=True,
-                )
+                # Throttle the side / metric panels to ~5 Hz — they only need
+                # to refresh when something visible to the user changes, and
+                # markdown re-renders are surprisingly expensive in Streamlit.
+                now_t = time.time()
+                if now_t - last_panel_update >= 0.2 or new_events:
+                    last_panel_update = now_t
 
-                present_names = sorted(tracker.currently_present)
-                present_placeholder.markdown(
-                    ("".join(
-                        f'<div class="event-row"><span class="who">{n}</span>'
-                        f'<span class="tag enter">IN</span></div>'
-                        for n in present_names
-                    ) if present_names
-                     else '<div class="empty-hint">Nobody yet.</div>'),
-                    unsafe_allow_html=True,
-                )
-                events_placeholder.markdown(
-                    _format_event_html(st.session_state.recent_events),
-                    unsafe_allow_html=True,
-                )
+                    metrics_placeholder.markdown(
+                        f'<div style="display:grid; grid-template-columns: repeat(3, 1fr); gap: 0.7rem; margin-top:0.6rem;">'
+                        f'  {_metric_card("Present now", str(len(tracker.currently_present)), "in classroom")}'
+                        f'  {_metric_card("Marked today", str(len(tracker.attendance_marked)), "unique attendees")}'
+                        f'  {_metric_card("Live / Recog FPS", f"{capture_fps:.0f} / {recognition_fps:.1f}", "camera · worker")}'
+                        f'</div>',
+                        unsafe_allow_html=True,
+                    )
 
-                _render_status_row(
-                    len(tracker.currently_present), len(ENCODER.people), True,
-                )
+                    present_names = tuple(sorted(tracker.currently_present))
+                    if present_names != last_present_signature:
+                        last_present_signature = present_names
+                        present_placeholder.markdown(
+                            ("".join(
+                                f'<div class="event-row"><span class="who">{n}</span>'
+                                f'<span class="tag enter">IN</span></div>'
+                                for n in present_names
+                            ) if present_names
+                             else '<div class="empty-hint">Nobody yet.</div>'),
+                            unsafe_allow_html=True,
+                        )
+
+                    events_signature = tuple(
+                        (e["name"], e["event"], e["time"])
+                        for e in st.session_state.recent_events[-12:]
+                    )
+                    if events_signature != last_events_signature:
+                        last_events_signature = events_signature
+                        events_placeholder.markdown(
+                            _format_event_html(st.session_state.recent_events),
+                            unsafe_allow_html=True,
+                        )
+
+                    _render_status_row(
+                        len(tracker.currently_present), len(ENCODER.people), True,
+                    )
 
                 # Pace the display loop to target_fps. Recognition runs
                 # independently in the worker thread, so a slow recognition
